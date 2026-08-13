@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"time"
 )
@@ -250,30 +251,100 @@ type FetchRequest struct {
 	URLs []string `json:"urls"`
 }
 
-// handleSearch handles GET /search?q=... and returns a stub placeholder response.
+// kagiPOST posts a JSON body to the given Kagi API path and returns the raw
+// response body. It reads the API token from the KAGI_TOKEN environment variable.
+func kagiPOST(ctx context.Context, path string, body any) ([]byte, error) {
+	token := os.Getenv("KAGI_TOKEN")
+	if token == "" {
+		return nil, fmt.Errorf("KAGI_TOKEN environment variable is not set")
+	}
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://kagi.com/api/v1"+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Kagi API returned %s: %s", resp.Status, string(bodyBytes))
+	}
+	return bodyBytes, nil
+}
+
+// writeMarkdown writes raw markdown with a 200 status.
+func writeMarkdown(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "text/markdown")
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
+}
+
+// handleSearch handles GET /search?q=... by querying the Kagi Search API.
 func handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
-		writeError(w, 400, "Missing 'q' query parameter")
+		writeError(w, http.StatusBadRequest, "Missing 'q' query parameter")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	fmt.Fprint(w, `{"results":[]}`)
+
+	respBody, err := kagiPOST(r.Context(), "/search", map[string]any{
+		"query":    q,
+		"workflow": "search",
+		"format":   "markdown",
+		"limit":    10,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeMarkdown(w, respBody)
 }
 
-// handleFetch handles POST /fetch and returns a stub placeholder response.
+// handleFetch handles POST /fetch by extracting content from URLs via the Kagi Extract API.
 func handleFetch(w http.ResponseWriter, r *http.Request) {
 	var req FetchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, 400, "Invalid JSON body")
+		writeError(w, http.StatusBadRequest, "Invalid JSON body")
 		return
 	}
 	if len(req.URLs) > 10 {
-		writeError(w, 400, "Maximum 10 URLs allowed")
+		writeError(w, http.StatusBadRequest, "Maximum 10 URLs allowed")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	fmt.Fprint(w, `{"results":[]}`)
+	if len(req.URLs) == 0 {
+		writeMarkdown(w, nil)
+		return
+	}
+
+	pages := make([]map[string]string, 0, len(req.URLs))
+	for _, u := range req.URLs {
+		pages = append(pages, map[string]string{"url": u})
+	}
+
+	respBody, err := kagiPOST(r.Context(), "/extract", map[string]any{
+		"pages":  pages,
+		"format": "markdown",
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeMarkdown(w, respBody)
 }
