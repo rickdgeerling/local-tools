@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,47 @@ func isValidID(id string) bool {
 		}
 	}
 	return true
+}
+
+// isValidRepo checks that repo looks like "owner/name" and contains only
+// characters valid in GitHub repository names.
+func isValidRepo(repo string) bool {
+	owner, name, found := strings.Cut(repo, "/")
+	if !found || owner == "" || name == "" {
+		return false
+	}
+	for _, c := range owner + name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ghTarget returns the argument to pass to `gh` for the requested item. If the
+// optional "repo" query parameter ("owner/name") is present, a full GitHub
+// URL is constructed; otherwise the bare numeric id is returned and gh infers
+// the repository from the working directory. It writes an error response and
+// returns "", false on invalid input.
+func ghTarget(w http.ResponseWriter, r *http.Request, invalidMsg, urlSegment string) (string, bool) {
+	id := r.PathValue("id")
+	if !isValidID(id) {
+		writeError(w, http.StatusBadRequest, invalidMsg)
+		return "", false
+	}
+
+	repo := r.URL.Query().Get("repo")
+	if repo == "" {
+		return id, true
+	}
+	if !isValidRepo(repo) {
+		writeError(w, http.StatusBadRequest, "Invalid repo (expected owner/name)")
+		return "", false
+	}
+	return fmt.Sprintf("https://github.com/%s/%s/%s", repo, urlSegment, id), true
 }
 
 // execGh runs a gh command with a 30-second context timeout.
@@ -59,16 +101,15 @@ type prCommit struct {
 	MessageBody     string `json:"messageBody"`
 }
 
-// handleGitHubPull handles GET /gh/pull/{id}.
+// handleGitHubPull handles GET /gh/pull/{id}[?repo=owner/name].
 func handleGitHubPull(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if !isValidID(id) {
-		writeError(w, http.StatusBadRequest, "Invalid PR number")
+	target, ok := ghTarget(w, r, "Invalid PR number", "pull")
+	if !ok {
 		return
 	}
 
 	// Fetch PR details (title, body, commits)
-	stdout, stderr, err := execGh(r.Context(), "pr", "view", "--json", "title,body,commits", id)
+	stdout, stderr, err := execGh(r.Context(), "pr", "view", "--json", "title,body,commits", target)
 	if err != nil {
 		msg := stderr
 		if msg == "" {
@@ -85,7 +126,7 @@ func handleGitHubPull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch PR diff
-	diffOut, diffErrOut, err := execGh(r.Context(), "pr", "diff", id)
+	diffOut, diffErrOut, err := execGh(r.Context(), "pr", "diff", target)
 	if err != nil {
 		msg := diffErrOut
 		if msg == "" {
@@ -134,6 +175,7 @@ type NotifyRequest struct {
 	Message string `json:"message"`
 	Agent   string `json:"agent"`
 	Level   string `json:"level"`
+	Quiet   bool   `json:"quiet"`
 }
 
 var validLevels = map[string]bool{"info": true, "warning": true, "error": true}
@@ -200,8 +242,10 @@ func handleNotify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute festival --tts (log error but continue)
-	if err := execFestival(r.Context(), req.Message); err != nil {
-		fmt.Printf("festival error: %v\n", err)
+	if req.Quiet != true {
+		if err := execFestival(r.Context(), req.Message); err != nil {
+			fmt.Printf("festival error: %v\n", err)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -209,15 +253,14 @@ func handleNotify(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
-// handleGitHubIssue handles GET /gh/issue/{id}.
+// handleGitHubIssue handles GET /gh/issue/{id}[?repo=owner/name].
 func handleGitHubIssue(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if !isValidID(id) {
-		writeError(w, http.StatusBadRequest, "Invalid issue number")
+	target, ok := ghTarget(w, r, "Invalid issue number", "issues")
+	if !ok {
 		return
 	}
 
-	stdout, stderr, err := execGh(r.Context(), "issue", "view", "--json", "title,body,comments", id)
+	stdout, stderr, err := execGh(r.Context(), "issue", "view", "--json", "title,body,comments", target)
 	if err != nil {
 		msg := stderr
 		if msg == "" {

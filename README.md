@@ -45,6 +45,14 @@ Default port is `0` (random). Press Ctrl+C to stop gracefully.
 | GET | `/search?q=...` | Web search (stub — returns empty results) |
 | POST | `/fetch` | Fetch web content (stub — returns empty results) |
 
+The `/gh/*` endpoints accept an optional `repo` query parameter (`owner/name`).
+When omitted, `gh` resolves the repository from its working directory.
+
+```bash
+# PR 42 of rickdgeerling/local-tools
+curl 'localhost:54321/gh/pull/42?repo=rickdgeerling/local-tools'
+```
+
 ## Architecture
 
 Pi runs inside a Docker container. local-mcp runs directly on the host.
