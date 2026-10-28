@@ -39,7 +39,7 @@ Default port is `0` (random). Press Ctrl+C to stop gracefully.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/gh/pull/{id}` | Fetch GitHub PR details, commits, and diff as markdown |
+| GET | `/gh/pull/{id}` | Fetch GitHub PR details, commits, and diff as markdown (lockfile diffs replaced with `[SKIPPED LOCKFILE]`) |
 | GET | `/gh/issue/{id}` | Fetch GitHub issue details and comments as markdown |
 | POST | `/notify` | Send desktop notification and TTS |
 | GET | `/search?q=...` | Web search (stub — returns empty results) |
@@ -66,5 +66,6 @@ the port from its stdout output.
 
 - All error responses use `Content-Type: text/markdown`
 - Success responses use `Content-Type: application/json` where appropriate
+- PR diffs omit the contents of known lockfiles (`package-lock.json`, `yarn.lock`, `go.sum`, `Cargo.lock`, `pnpm-lock.yaml`, ...) — their diff sections are replaced with `[SKIPPED LOCKFILE] (N lines omitted)` to preserve context for hand-written files. Match is by base filename, case-insensitive
 - External commands use context-based timeouts (30s for `gh`, 60s for `festival`)
 - No authentication on any endpoint

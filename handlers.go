@@ -101,6 +101,114 @@ type prCommit struct {
 	MessageBody     string `json:"messageBody"`
 }
 
+// lockfileNames is the set of generated dependency-lock filenames, matched
+// case-insensitively by base name, whose diff contents are replaced with a
+// placeholder to preserve context for hand-written files.
+var lockfileNames = map[string]bool{
+	"bun.lock":            true,
+	"bun.lockb":           true,
+	"cargo.lock":          true,
+	"cartfile.resolved":   true,
+	"composer.lock":       true,
+	"deno.lock":           true,
+	"flake.lock":          true,
+	"gemfile.lock":        true,
+	"go.sum":              true,
+	"go.work.sum":         true,
+	"mix.lock":            true,
+	"npm-shrinkwrap.json": true,
+	"package-lock.json":   true,
+	"package.resolved":    true,
+	"packages.lock.json":  true,
+	"pipfile.lock":        true,
+	"podfile.lock":        true,
+	"pnpm-lock.yaml":      true,
+	"poetry.lock":         true,
+	"pubspec.lock":        true,
+	"pdm.lock":            true,
+	"uv.lock":             true,
+	"yarn.lock":           true,
+}
+
+// skippedLockfileMessage replaces the body of each lockfile diff section.
+const skippedLockfileMessage = "[SKIPPED LOCKFILE]"
+
+// isLockfilePath reports whether path refers to a known dependency lockfile.
+func isLockfilePath(path string) bool {
+	base := path
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	return base != "" && lockfileNames[strings.ToLower(base)]
+}
+
+// parseDiffGitPaths extracts the a- and b-side paths from a
+// "diff --git a/<path> b/<path>" header line. Paths containing special
+// characters are C-style quoted by git; both forms are handled. Empty
+// strings are returned for lines that cannot be parsed.
+func parseDiffGitPaths(line string) (aPath, bPath string) {
+	rest := strings.TrimPrefix(line, "diff --git ")
+	if strings.HasPrefix(rest, `"`) {
+		// Quoted form: "a/x" "b/x"
+		if end := strings.IndexByte(rest[1:], '"'); end >= 0 {
+			aPath = rest[1 : 1+end]
+			bPath = strings.Trim(strings.TrimLeft(rest[2+end:], " "), `"`)
+		}
+		return strings.TrimPrefix(aPath, "a/"), strings.TrimPrefix(bPath, "b/")
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 2 {
+		return strings.TrimPrefix(fields[0], "a/"), strings.TrimPrefix(fields[1], "b/")
+	}
+	return "", ""
+}
+
+// stripLockfileDiffs replaces the contents of lockfile diff sections with a
+// "[SKIPPED LOCKFILE]" placeholder, keeping the "diff --git" header so the
+// change is still visible. Non-lockfile sections pass through unchanged.
+func stripLockfileDiffs(diff string) string {
+	trailing := strings.HasSuffix(diff, "\n")
+	body := strings.TrimSuffix(diff, "\n")
+	if body == "" {
+		return diff
+	}
+
+	var out strings.Builder
+	skipping := false
+	skippedLines := 0
+	flushPlaceholder := func() {
+		if skipping {
+			fmt.Fprintf(&out, "%s (%d lines omitted)\n", skippedLockfileMessage, skippedLines)
+			skipping = false
+			skippedLines = 0
+		}
+	}
+
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "diff --git ") {
+			flushPlaceholder()
+			aPath, bPath := parseDiffGitPaths(line)
+			skipping = isLockfilePath(aPath) || isLockfilePath(bPath)
+			out.WriteString(line)
+			out.WriteByte('\n')
+			continue
+		}
+		if skipping {
+			skippedLines++
+			continue
+		}
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	flushPlaceholder()
+
+	result := strings.TrimSuffix(out.String(), "\n")
+	if trailing {
+		result += "\n"
+	}
+	return result
+}
+
 // handleGitHubPull handles GET /gh/pull/{id}[?repo=owner/name].
 func handleGitHubPull(w http.ResponseWriter, r *http.Request) {
 	target, ok := ghTarget(w, r, "Invalid PR number", "pull")
@@ -135,6 +243,10 @@ func handleGitHubPull(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, msg)
 		return
 	}
+
+	// Replace lockfile diff contents with a placeholder so context is spent
+	// on hand-written files instead of generated lockfiles.
+	diffOut = stripLockfileDiffs(diffOut)
 
 	// Build markdown
 	markdown := fmt.Sprintf("# %s\n\n%s\n\n---\nCommits\n---\n", pr.Title, pr.Body)
